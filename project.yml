@@ -1,40 +1,38 @@
-name: PodsStats
+name: ApexGrid
 options:
   bundleIdPrefix: com.custom
   deploymentTarget:
     iOS: "17.0"
 targets:
-  PodsStats:
+  ApexGrid:
     type: application
     platform: iOS
     sources:
       - path: Sources
     dependencies:
-      - target: PodsStatsWidget
+      - target: ApexGridWidget
         embed: true
         codeSign: false
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.custom.podsstats
+        PRODUCT_BUNDLE_IDENTIFIER: com.custom.apexgrid
         INFOPLIST_FILE: Resources/Info.plist
-        CODE_SIGN_ENTITLEMENTS: Resources/PodsStats.entitlements
         MARKETING_VERSION: "2.0.0"
-        CURRENT_PROJECT_VERSION: "2"
+        CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1"
 
-  PodsStatsWidget:
+  ApexGridWidget:
     type: app-extension
     platform: iOS
     sources:
       - path: WidgetSources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.custom.podsstats.widget
+        PRODUCT_BUNDLE_IDENTIFIER: com.custom.apexgrid.widget
         INFOPLIST_FILE: Resources/WidgetInfo.plist
-        CODE_SIGN_ENTITLEMENTS: Resources/PodsStatsWidget.entitlements
         MARKETING_VERSION: "2.0.0"
-        CURRENT_PROJECT_VERSION: "2"
+        CURRENT_PROJECT_VERSION: "1"
         SWIFT_VERSION: "5.9"
         TARGETED_DEVICE_FAMILY: "1"
         SKIP_INSTALL: YES
