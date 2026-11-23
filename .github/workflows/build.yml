@@ -1,0 +1,63 @@
+name: Build ApexGrid IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Select Latest Xcode
+        run: |
+          LATEST_XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)
+          sudo xcode-select -s "$LATEST_XCODE"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Build Unsigned Archive
+        run: |
+          xcodebuild archive \
+            -project ApexGrid.xcodeproj \
+            -scheme ApexGrid \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath build/ApexGrid.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package IPA
+        run: |
+          mkdir -p build/Payload
+          cp -r build/ApexGrid.xcarchive/Products/Applications/ApexGrid.app build/Payload/
+          cd build
+          zip -r ApexGrid.ipa Payload
+
+      - name: Publish Direct IPA to Releases
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v2.5-$(date +%Y%m%d-%H%M%S)"
+          gh release create "$TAG" build/ApexGrid.ipa \
+            --title "ApexGrid $TAG" \
+            --notes "直接點擊下方 ApexGrid.ipa 下載，免解壓。"
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ApexGrid-ipa
+          path: build/ApexGrid.ipa
