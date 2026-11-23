@@ -32,10 +32,11 @@ struct NativeTranslationBridge: View {
     @State private var config: TranslationSession.Configuration?
 
     var body: some View {
+        let storeRef = store
         Color.clear
             .frame(width: 0, height: 0)
             .translationTask(config) { session in
-                let batch = await MainActor.run { store.pendingNativeTexts }
+                let batch = await MainActor.run { storeRef.pendingNativeTexts }
                 guard !batch.isEmpty else { return }
                 let reqs = batch.map { TranslationSession.Request(sourceText: $0) }
                 if let responses = try? await session.translations(from: reqs) {
@@ -43,9 +44,9 @@ struct NativeTranslationBridge: View {
                     for (orig, res) in zip(batch, responses) {
                         map[orig] = res.targetText
                     }
-                    await MainActor.run { store.applyNativeTranslations(map) }
+                    await MainActor.run { storeRef.applyNativeTranslations(map) }
                 } else {
-                    await MainActor.run { store.isTranslating = false }
+                    await MainActor.run { storeRef.isTranslating = false }
                 }
             }
             .onChange(of: store.nativeTranslateTriggerID) { _, _ in
@@ -66,16 +67,24 @@ struct NativeTranslationBridge: View {
 struct RaceGlassModifier<S: InsettableShape>: ViewModifier {
     let shape: S
     let interactive: Bool
+
+    @ViewBuilder
     func body(content: Content) -> some View {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
-            content.glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
+            if interactive {
+                content.glassEffect(.regular.interactive(), in: shape)
+            } else {
+                content.glassEffect(.regular, in: shape)
+            }
         } else {
-            content.background(.ultraThinMaterial, in: shape)
+            content
+                .background(.ultraThinMaterial, in: shape)
                 .overlay(shape.strokeBorder(Color.white.opacity(0.20), lineWidth: 0.8))
         }
         #else
-        content.background(.ultraThinMaterial, in: shape)
+        content
+            .background(.ultraThinMaterial, in: shape)
             .overlay(shape.strokeBorder(Color.white.opacity(0.20), lineWidth: 0.8))
         #endif
     }
@@ -113,9 +122,19 @@ struct RacingBackgroundView: View {
             if showSubtleGrid && wallRepo.customWallpaper == nil {
                 Canvas { context, size in
                     let step: CGFloat = 24
-                    var path = Path(), x: CGFloat = 0, y: CGFloat = 0
-                    while x < size.width { path.move(to: CGPoint(x: x, y: 0)); path.addLine(to: CGPoint(x: x, y: size.height)); x += step }
-                    while y < size.height { path.move(to: CGPoint(x: 0, y: y)); path.addLine(to: CGPoint(x: size.width, y: y)); y += step }
+                    var path = Path()
+                    var x: CGFloat = 0
+                    var y: CGFloat = 0
+                    while x < size.width {
+                        path.move(to: CGPoint(x: x, y: 0))
+                        path.addLine(to: CGPoint(x: x, y: size.height))
+                        x += step
+                    }
+                    while y < size.height {
+                        path.move(to: CGPoint(x: 0, y: y))
+                        path.addLine(to: CGPoint(x: size.width, y: y))
+                        y += step
+                    }
                     context.stroke(path, with: .color(.white.opacity(0.025)), lineWidth: 0.5)
                 }
             }
@@ -128,6 +147,7 @@ struct GlassPanel<Content: View>: View {
     var cornerRadius: CGFloat = 24
     var highlightOpacity: Double = 0.24
     @ViewBuilder let content: () -> Content
+
     var body: some View {
         content()
             .background(
@@ -153,7 +173,9 @@ struct ConstellationRingView: View {
 
     var body: some View {
         if animate {
-            TimelineView(.animation) { timeline in ringCanvas(t: timeline.date.timeIntervalSinceReferenceDate) }
+            TimelineView(.animation) { timeline in
+                ringCanvas(t: timeline.date.timeIntervalSinceReferenceDate)
+            }
         } else {
             ringCanvas(t: 14.0)
         }
@@ -164,7 +186,9 @@ struct ConstellationRingView: View {
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             let baseRadius = min(size.width, size.height) * 0.37
             for i in 0..<particleCount {
-                let s1 = pseudoRandom(i * 3 + 1), s2 = pseudoRandom(i * 3 + 2), s3 = pseudoRandom(i * 3 + 3)
+                let s1 = pseudoRandom(i * 3 + 1)
+                let s2 = pseudoRandom(i * 3 + 2)
+                let s3 = pseudoRandom(i * 3 + 3)
                 let spread = (s1 + s2 - 1.0) * (baseRadius * 0.42)
                 let angle = s1 * .pi * 2 + t * (0.04 + s3 * 0.08) * (i % 2 == 0 ? 1 : -1)
                 let r = baseRadius + spread + sin(t * (0.6 + s2) + Double(i)) * 4.0
@@ -186,7 +210,8 @@ struct SafariSheetView: UIViewControllerRepresentable {
     let url: URL
     func makeUIViewController(context: Context) -> SFSafariViewController {
         let vc = SFSafariViewController(url: url)
-        vc.preferredBarTintColor = .black; vc.preferredControlTintColor = .white
+        vc.preferredBarTintColor = .black
+        vc.preferredControlTintColor = .white
         return vc
     }
     func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
@@ -211,19 +236,15 @@ struct MainTabRootView: View {
                 SeriesHubView()
                     .tabItem { Label("賽事", systemImage: "flag.checkered") }
                     .tag(0)
-
                 TelemetryWeekendView()
                     .tabItem { Label("遙測", systemImage: "waveform.path.ecg") }
                     .tag(1)
-
                 SeasonStatsView()
                     .tabItem { Label("統計", systemImage: "chart.bar.fill") }
                     .tag(2)
-
                 NewsRoomView()
                     .tabItem { Label("新聞", systemImage: "newspaper.fill") }
                     .tag(3)
-
                 AppSettingsView()
                     .tabItem { Label("設定", systemImage: "gearshape.fill") }
                     .tag(4)
@@ -344,8 +365,7 @@ struct SeriesHubView: View {
                                         Text("· \(store.displayTranslated(ev.name)) ·")
                                             .font(.system(size: 12, weight: .semibold))
                                             .foregroundStyle(.white.opacity(0.75))
-                                            .lineLimit(1)
-                                            .frame(maxWidth: 210)
+                                            .lineLimit(1).frame(maxWidth: 210)
 
                                         Text(RaceDateFmt.fullMacau.string(from: ev.raceDate))
                                             .font(.system(size: 10.5, design: .rounded))
@@ -366,10 +386,7 @@ struct SeriesHubView: View {
                                     SeriesHeroCard(series: series, masked: isMasked)
                                         .containerRelativeFrame(.horizontal) { length, _ in min(length - 80, 310) }
                                         .id(series)
-                                        .onTapGesture {
-                                            store.haptic()
-                                            navPath.append(series)
-                                        }
+                                        .onTapGesture { store.haptic(); navPath.append(series) }
                                         .contextMenu {
                                             Button { navPath.append(series) } label: { Label("查看完整積分榜與賽程", systemImage: "list.number") }
                                             if let ev = store.nextEvent(for: series) {
@@ -393,43 +410,36 @@ struct SeriesHubView: View {
                         HStack(spacing: 7) {
                             ForEach(RaceSeries.allCases) { s in
                                 let isCurrent = (activeSeries ?? .f1) == s
-                                Circle()
-                                    .fill(Color.white.opacity(isCurrent ? 0.94 : 0.25))
+                                Circle().fill(Color.white.opacity(isCurrent ? 0.94 : 0.25))
                                     .frame(width: isCurrent ? 7 : 5.5, height: isCurrent ? 7 : 5.5)
                             }
                         }
                         .padding(.top, 14)
 
                         Text("輕點卡片進入完整積分與賽程 · 長按預約提醒 · 下拉刷新")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.48))
-                            .padding(.top, 8)
+                            .font(.system(size: 11)).foregroundStyle(.white.opacity(0.48)).padding(.top, 8)
 
-                        let breaking = store.articles.filter(\.isBreaking).prefix(3)
+                        let breaking = Array(store.articles.filter(\.isBreaking).prefix(3))
                         if !breaking.isEmpty {
                             VStack(alignment: .leading, spacing: 10) {
                                 HStack {
                                     Label("重點突發快訊（AI 繁中）", systemImage: "bolt.fill")
-                                        .font(.system(size: 14, weight: .bold))
-                                        .foregroundStyle(.white.opacity(0.9))
+                                        .font(.system(size: 14, weight: .bold)).foregroundStyle(.white.opacity(0.9))
                                     Spacer()
                                     if isMasked {
                                         Button("暫時解鎖") { withAnimation { revealOnce = true } }
                                             .font(.caption.bold()).foregroundStyle(.yellow)
                                     }
                                 }
-                                ForEach(Array(breaking)) { art in
+                                ForEach(breaking) { art in
                                     GlassPanel(cornerRadius: 18, highlightOpacity: 0.18) {
                                         HStack(alignment: .top, spacing: 10) {
                                             Text(art.alertTag ?? "焦點")
-                                                .font(.system(size: 10, weight: .black))
-                                                .foregroundStyle(.white)
-                                                .padding(.horizontal, 8).padding(.vertical, 4)
-                                                .background(Color.red, in: Capsule())
+                                                .font(.system(size: 10, weight: .black)).foregroundStyle(.white)
+                                                .padding(.horizontal, 8).padding(.vertical, 4).background(Color.red, in: Capsule())
                                             VStack(alignment: .leading, spacing: 4) {
                                                 Text(store.displayTranslated(art.title))
-                                                    .font(.system(size: 13.5, weight: .semibold))
-                                                    .foregroundStyle(.white)
+                                                    .font(.system(size: 13.5, weight: .semibold)).foregroundStyle(.white)
                                                     .blur(radius: isMasked ? 6 : 0)
                                                 Text("\(art.series.rawValue) · \(RaceDateFmt.relativeText(art.pubDate))")
                                                     .font(.system(size: 11)).foregroundStyle(.white.opacity(0.5))
@@ -488,18 +498,15 @@ struct SeriesHeroCard: View {
                         Image(systemName: series.symbol).font(.system(size: 12, weight: .bold))
                         Text(series.rawValue).font(.system(size: 13, weight: .black, design: .rounded))
                     }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .foregroundStyle(.white).padding(.horizontal, 10).padding(.vertical, 5)
                     .background(series.badgeColor, in: Capsule())
 
                     Spacer()
 
                     if p1 != nil && p2 != nil {
                         Text("領先 +\(Int(gap)) 分")
-                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundStyle(.green)
-                            .padding(.horizontal, 8).padding(.vertical, 4)
-                            .background(Color.green.opacity(0.16), in: Capsule())
+                            .font(.system(size: 11, weight: .bold, design: .rounded)).foregroundStyle(.green)
+                            .padding(.horizontal, 8).padding(.vertical, 4).background(Color.green.opacity(0.16), in: Capsule())
                             .blur(radius: masked ? 5 : 0)
                     }
                 }
@@ -718,7 +725,10 @@ struct SeriesDetailView: View {
 }
 
 struct RaceMetricTile: View {
-    let title: String, bigValue: String, sub: String
+    let title: String
+    let bigValue: String
+    let sub: String
+
     var body: some View {
         GlassPanel(cornerRadius: 20, highlightOpacity: 0.18) {
             VStack(alignment: .leading, spacing: 8) {
@@ -726,47 +736,8 @@ struct RaceMetricTile: View {
                 Text(bigValue).font(.system(size: 26, weight: .black, design: .rounded)).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.75)
                 Text(sub).font(.system(size: 11)).foregroundStyle(.white.opacity(0.45)).lineLimit(1)
             }
-            .frame(maxWidth: .infinity, alignment: .leading).padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
         }
     }
 }
-
-// MARK: - TAB 2: F1 Telemetry & Race Weekend
-struct TelemetryWeekendView: View {
-    @EnvironmentObject var store: MotorsportStore
-    @EnvironmentObject var radioPlayer: RadioAudioPlayer
-    @State private var labTab = 0
-    @State private var selectedRadioDriver = "ALL"
-
-    var body: some View {
-        let prog = store.f1SeasonProgress()
-        let ratio = Double(prog.completed) / Double(max(1, prog.total))
-
-        NavigationStack {
-            ZStack {
-                RacingBackgroundView()
-
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("遙測實驗室").font(.system(size: 32, weight: .bold)).foregroundStyle(.white)
-                                Text(store.openF1SessionName.isEmpty ? "OpenF1 數據同步中..." : store.openF1SessionName)
-                                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(store.theme.accent)
-                            }
-                            Spacer()
-                            if store.isLoadingTelemetry { ProgressView().tint(.white) }
-                        }
-
-                        GlassPanel(cornerRadius: 26, highlightOpacity: 0.25) {
-                            HStack(spacing: 18) {
-                                ZStack {
-                                    Circle().stroke(Color.white.opacity(0.10), lineWidth: 11)
-                                    Circle()
-                                        .trim(from: 0, to: ratio)
-                                        .stroke(LinearGradient(colors: [store.theme.accent, store.theme.accent.opacity(0.45)], startPoint: .topLeading, endPoint: .bottomTrailing), style: StrokeStyle(lineWidth: 11, lineCap: .round))
-                                        .rotationEffect(.degrees(-90))
-                                    VStack(spacing: 1) {
-                                        Text("\(Int(round(ratio * 100)))%").font(.system(size: 19, weight: .bold, design: .rounded)).foregroundStyle(.white)
-                                        Text("賽季進度").font(.system(size: 9.5)).foregroundStyle(.white.opacity(0.55))
-                                    }
