@@ -1,5 +1,10 @@
 import SwiftUI
 import SafariServices
+import PhotosUI
+import UIKit
+#if canImport(Translation)
+import Translation
+#endif
 
 @main
 struct ApexGridApp: App {
@@ -19,23 +24,58 @@ struct ApexGridApp: App {
     }
 }
 
-// MARK: - Native iOS 26 Liquid Glass Modifier (Safe Fallback for iOS 17/18)
+// MARK: - Apple Native On-Device Translation Bridge (iOS 18+)
+#if canImport(Translation)
+@available(iOS 18.0, *)
+struct NativeTranslationBridge: View {
+    @EnvironmentObject var store: MotorsportStore
+    @State private var config: TranslationSession.Configuration?
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .translationTask(config) { session in
+                let batch = await MainActor.run { store.pendingNativeTexts }
+                guard !batch.isEmpty else { return }
+                let reqs = batch.map { TranslationSession.Request(sourceText: $0) }
+                if let responses = try? await session.translations(from: reqs) {
+                    var map: [String: String] = [:]
+                    for (orig, res) in zip(batch, responses) {
+                        map[orig] = res.targetText
+                    }
+                    await MainActor.run { store.applyNativeTranslations(map) }
+                } else {
+                    await MainActor.run { store.isTranslating = false }
+                }
+            }
+            .onChange(of: store.nativeTranslateTriggerID) { _, _ in
+                if config == nil {
+                    config = TranslationSession.Configuration(
+                        source: Locale.Language(identifier: "en"),
+                        target: Locale.Language(identifier: "zh-Hant")
+                    )
+                } else {
+                    config?.invalidate()
+                }
+            }
+    }
+}
+#endif
+
+// MARK: - Design System (Cosmic + Native Liquid Glass)
 struct RaceGlassModifier<S: InsettableShape>: ViewModifier {
     let shape: S
     let interactive: Bool
-
     func body(content: Content) -> some View {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             content.glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
         } else {
-            content
-                .background(.ultraThinMaterial, in: shape)
+            content.background(.ultraThinMaterial, in: shape)
                 .overlay(shape.strokeBorder(Color.white.opacity(0.20), lineWidth: 0.8))
         }
         #else
-        content
-            .background(.ultraThinMaterial, in: shape)
+        content.background(.ultraThinMaterial, in: shape)
             .overlay(shape.strokeBorder(Color.white.opacity(0.20), lineWidth: 0.8))
         #endif
     }
@@ -49,35 +89,96 @@ extension View {
 
 struct RacingBackgroundView: View {
     @EnvironmentObject var store: MotorsportStore
+    @ObservedObject private var wallRepo = WallpaperRepository.shared
+    var showSubtleGrid: Bool = false
+
     var body: some View {
         ZStack {
-            LinearGradient(colors: store.theme.bgColors, startPoint: .topLeading, endPoint: .bottomTrailing)
-            RadialGradient(colors: [store.theme.accent.opacity(0.24), .clear], center: .topTrailing, startRadius: 10, endRadius: 420)
+            if let img = wallRepo.customWallpaper {
+                GeometryReader { geo in
+                    Image(uiImage: img)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                        .blur(radius: store.wallpaperBlur)
+                        .scaleEffect(1.06)
+                }
+                Color.black.opacity(store.wallpaperDim)
+            } else {
+                LinearGradient(colors: store.theme.bgColors, startPoint: .topLeading, endPoint: .bottomTrailing)
+                RadialGradient(colors: [store.theme.accent.opacity(0.26), .clear], center: .top, startRadius: 20, endRadius: 430)
+            }
+
+            if showSubtleGrid && wallRepo.customWallpaper == nil {
+                Canvas { context, size in
+                    let step: CGFloat = 24
+                    var path = Path(), x: CGFloat = 0, y: CGFloat = 0
+                    while x < size.width { path.move(to: CGPoint(x: x, y: 0)); path.addLine(to: CGPoint(x: x, y: size.height)); x += step }
+                    while y < size.height { path.move(to: CGPoint(x: 0, y: y)); path.addLine(to: CGPoint(x: size.width, y: y)); y += step }
+                    context.stroke(path, with: .color(.white.opacity(0.025)), lineWidth: 0.5)
+                }
+            }
         }
         .ignoresSafeArea()
     }
 }
 
 struct GlassPanel<Content: View>: View {
-    var cornerRadius: CGFloat = 22
+    var cornerRadius: CGFloat = 24
+    var highlightOpacity: Double = 0.24
     @ViewBuilder let content: () -> Content
     var body: some View {
         content()
             .background(
                 ZStack {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(Color.white.opacity(0.06))
+                        .fill(LinearGradient(colors: [Color.white.opacity(0.11), Color.white.opacity(0.04), Color.white.opacity(0.03)], startPoint: .topLeading, endPoint: .bottomTrailing))
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(.ultraThinMaterial.opacity(0.55))
+                        .fill(.ultraThinMaterial.opacity(0.56))
                 }
             )
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(colors: [.white.opacity(0.22), .white.opacity(0.05), .white.opacity(0.12)], startPoint: .topLeading, endPoint: .bottomTrailing),
-                        lineWidth: 1
-                    )
+                    .strokeBorder(LinearGradient(colors: [Color.white.opacity(highlightOpacity), Color.white.opacity(0.06), Color.white.opacity(0.14)], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 1)
             )
+            .shadow(color: Color.black.opacity(0.32), radius: 16, x: 0, y: 8)
+    }
+}
+
+struct ConstellationRingView: View {
+    let animate: Bool
+    let tintColor: Color
+    private let particleCount = 240
+
+    var body: some View {
+        if animate {
+            TimelineView(.animation) { timeline in ringCanvas(t: timeline.date.timeIntervalSinceReferenceDate) }
+        } else {
+            ringCanvas(t: 14.0)
+        }
+    }
+
+    private func ringCanvas(t: Double) -> some View {
+        Canvas { context, size in
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            let baseRadius = min(size.width, size.height) * 0.37
+            for i in 0..<particleCount {
+                let s1 = pseudoRandom(i * 3 + 1), s2 = pseudoRandom(i * 3 + 2), s3 = pseudoRandom(i * 3 + 3)
+                let spread = (s1 + s2 - 1.0) * (baseRadius * 0.42)
+                let angle = s1 * .pi * 2 + t * (0.04 + s3 * 0.08) * (i % 2 == 0 ? 1 : -1)
+                let r = baseRadius + spread + sin(t * (0.6 + s2) + Double(i)) * 4.0
+                let twinkle = 0.24 + 0.76 * abs(sin(t * (0.9 + s3 * 1.4) + Double(i) * 0.7))
+                let dotR = (s3 > 0.86) ? 2.4 : (s3 > 0.55 ? 1.5 : 0.95)
+                let rect = CGRect(x: center.x + cos(angle) * r - dotR, y: center.y + sin(angle) * r - dotR, width: dotR * 2, height: dotR * 2)
+                context.fill(Path(ellipseIn: rect), with: .color(((i % 4 == 0) ? tintColor : .white).opacity(twinkle * 0.88)))
+            }
+        }
+    }
+
+    private func pseudoRandom(_ seed: Int) -> Double {
+        let x = sin(Double(seed) * 12.9898) * 43758.5453
+        return x - floor(x)
     }
 }
 
@@ -85,694 +186,562 @@ struct SafariSheetView: UIViewControllerRepresentable {
     let url: URL
     func makeUIViewController(context: Context) -> SFSafariViewController {
         let vc = SFSafariViewController(url: url)
-        vc.preferredBarTintColor = .black
-        vc.preferredControlTintColor = .white
+        vc.preferredBarTintColor = .black; vc.preferredControlTintColor = .white
         return vc
     }
     func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
 }
 
-// MARK: - Root Native TabView (5 Tabs)
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+// MARK: - Root Container
 struct MainTabRootView: View {
     @EnvironmentObject var store: MotorsportStore
     @State private var selectedTab = 0
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            HubDashboardView()
-                .tabItem { Label("看板", systemImage: "flag.checkered") }
-                .tag(0)
+        ZStack {
+            TabView(selection: $selectedTab) {
+                SeriesHubView()
+                    .tabItem { Label("賽事", systemImage: "flag.checkered") }
+                    .tag(0)
 
-            StandingsAndH2HView()
-                .tabItem { Label("積分", systemImage: "trophy.fill") }
-                .tag(1)
+                TelemetryWeekendView()
+                    .tabItem { Label("遙測", systemImage: "waveform.path.ecg") }
+                    .tag(1)
 
-            F1TelemetryLabView()
-                .tabItem { Label("遙測", systemImage: "waveform.path.ecg") }
-                .tag(2)
+                SeasonStatsView()
+                    .tabItem { Label("統計", systemImage: "chart.bar.fill") }
+                    .tag(2)
 
-            NewsFeedView()
-                .tabItem { Label("新聞", systemImage: "newspaper.fill") }
-                .tag(3)
+                NewsRoomView()
+                    .tabItem { Label("新聞", systemImage: "newspaper.fill") }
+                    .tag(3)
 
-            AppSettingsView()
-                .tabItem { Label("設定", systemImage: "gearshape.fill") }
-                .tag(4)
+                AppSettingsView()
+                    .tabItem { Label("設定", systemImage: "gearshape.fill") }
+                    .tag(4)
+            }
+            .tint(store.theme.accent)
+
+            #if canImport(Translation)
+            if #available(iOS 18.0, *) {
+                NativeTranslationBridge()
+            }
+            #endif
         }
-        .tint(store.theme.accent)
     }
 }
 
-// MARK: - TAB 1: Cross-Series Hub Dashboard
-struct HubDashboardView: View {
+// MARK: - TAB 1: Series Hub
+struct SeriesHubView: View {
     @EnvironmentObject var store: MotorsportStore
+    @State private var activeSeries: RaceSeries? = .f1
+    @State private var navPath = NavigationPath()
+    @State private var showBriefing = false
     @State private var reminderToast: String?
-    @State private var revealSpoilersOnce = false
+    @State private var revealOnce = false
+    @State private var pulse = false
 
-    private var isMasked: Bool { store.spoilerFree && !revealSpoilersOnce }
+    private var isMasked: Bool { store.spoilerFree && !revealOnce }
 
     var body: some View {
-        NavigationStack {
+        let nextEv = store.nextGlobalEvent()
+
+        NavigationStack(path: $navPath) {
             ZStack {
                 RacingBackgroundView()
 
                 ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 18) {
-                        // Top Bar
+                    VStack(spacing: 0) {
                         HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("APEXGRID")
-                                    .font(.system(size: 12, weight: .black, design: .rounded))
-                                    .tracking(2.5)
-                                    .foregroundStyle(store.theme.accent)
-                                Text("賽車總覽")
-                                    .font(.system(size: 30, weight: .bold))
-                                    .foregroundStyle(.white)
-                            }
-                            Spacer()
                             Button {
                                 store.haptic()
-                                withAnimation {
-                                    store.spoilerFree.toggle()
-                                    revealSpoilersOnce = false
-                                }
+                                showBriefing = true
+                                Task { await store.generateAIBriefing() }
                             } label: {
-                                HStack(spacing: 5) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "sparkles")
+                                    Text("AI 速報")
+                                }
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 11).padding(.vertical, 6)
+                                .raceGlass(in: Capsule(), interactive: true)
+                            }
+
+                            Spacer()
+                            Text("賽事").font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                            Spacer()
+
+                            Button {
+                                store.haptic()
+                                withAnimation { store.spoilerFree.toggle(); revealOnce = false }
+                            } label: {
+                                HStack(spacing: 4) {
                                     Image(systemName: store.spoilerFree ? "eye.slash.fill" : "eye.fill")
                                     Text(store.spoilerFree ? "防劇透" : "即時")
                                 }
                                 .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(store.spoilerFree ? .yellow : .white)
-                                .padding(.horizontal, 12).padding(.vertical, 7)
+                                .foregroundStyle(store.spoilerFree ? .yellow : .white.opacity(0.92))
+                                .padding(.horizontal, 11).padding(.vertical, 6)
                                 .raceGlass(in: Capsule(), interactive: true)
                             }
                         }
+                        .padding(.horizontal, 20).padding(.top, 10)
 
-                        // Next Global Race Countdown Hero
-                        if let next = store.nextGlobalEvent() {
-                            NextRaceCountdownCard(event: next) {
-                                Task {
-                                    let ok = await store.scheduleReminder(for: next)
-                                    showToast(ok ? "已設定開賽前 15 分鐘提醒！" : "無法排程（請檢查通知權限或賽事已開始）")
-                                }
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(store.isLoading ? Color.yellow : Color.green)
+                                .frame(width: 8, height: 8)
+                                .scaleEffect(pulse ? 1.3 : 0.85)
+                                .opacity(pulse ? 1.0 : 0.6)
+                                .animation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true), value: pulse)
+                                .onAppear { pulse = true }
+
+                            Text(store.isTranslating ? "AI 翻譯中..." : "即時數據已連線 · 澳門時間")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.92))
+
+                            if store.autoTranslateEnabled {
+                                Text("AI 繁中").font(.system(size: 10, weight: .black)).foregroundStyle(store.theme.accent)
                             }
                         }
+                        .padding(.horizontal, 13).padding(.vertical, 6)
+                        .raceGlass(in: Capsule(), interactive: false)
+                        .padding(.top, 10)
 
-                        // Who's Leading Now (F1 / MotoGP / TCR)
-                        HStack {
-                            Text("誰領先緊 · 積分榜 P1")
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundStyle(.white)
-                            Spacer()
-                            if isMasked {
-                                Button("點此解鎖") {
-                                    store.haptic()
-                                    withAnimation { revealSpoilersOnce = true }
+                        TimelineView(.periodic(from: .now, by: 60)) { _ in
+                            ZStack {
+                                ConstellationRingView(animate: store.enableParticles, tintColor: store.theme.accent)
+                                    .frame(width: 274, height: 248)
+
+                                if let ev = nextEv {
+                                    let cd = RaceDateFmt.countdownParts(to: ev.raceDate)
+                                    VStack(spacing: 5) {
+                                        Text(ev.series.rawValue)
+                                            .font(.system(size: 11, weight: .black, design: .rounded))
+                                            .foregroundStyle(.white)
+                                            .padding(.horizontal, 8).padding(.vertical, 2)
+                                            .background(ev.series.badgeColor, in: Capsule())
+
+                                        HStack(alignment: .firstTextBaseline, spacing: 2) {
+                                            if cd.days > 0 {
+                                                Text("\(cd.days)").font(.system(size: 38, weight: .bold, design: .rounded)).foregroundStyle(.white)
+                                                Text("日").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white.opacity(0.65)).padding(.trailing, 4)
+                                            }
+                                            Text("\(cd.hours)").font(.system(size: 38, weight: .bold, design: .rounded)).foregroundStyle(.white)
+                                            Text("時").font(.system(size: 14, weight: .semibold)).foregroundStyle(.white.opacity(0.65))
+                                        }
+                                        .monospacedDigit()
+
+                                        Text("· \(store.displayTranslated(ev.name)) ·")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundStyle(.white.opacity(0.75))
+                                            .lineLimit(1)
+                                            .frame(maxWidth: 210)
+
+                                        Text(RaceDateFmt.fullMacau.string(from: ev.raceDate))
+                                            .font(.system(size: 10.5, design: .rounded))
+                                            .foregroundStyle(.white.opacity(0.5))
+                                    }
+                                } else {
+                                    VStack(spacing: 6) {
+                                        Text("APEXGRID").font(.system(size: 24, weight: .black, design: .rounded)).foregroundStyle(.white)
+                                        Text("· 下拉同步最新賽事 ·").font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55))
+                                    }
                                 }
-                                .font(.caption.bold())
-                                .foregroundStyle(.yellow)
                             }
                         }
 
                         ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 14) {
+                            LazyHStack(spacing: 16) {
                                 ForEach(RaceSeries.allCases) { series in
-                                    let list = store.driverStandings[series] ?? []
-                                    let p1 = list.first
-                                    let p2 = list.count > 1 ? list[1] : nil
-                                    LeaderMiniCard(series: series, p1: p1, p2: p2, masked: isMasked)
-                                        .frame(width: 245)
+                                    SeriesHeroCard(series: series, masked: isMasked)
+                                        .containerRelativeFrame(.horizontal) { length, _ in min(length - 80, 310) }
+                                        .id(series)
+                                        .onTapGesture {
+                                            store.haptic()
+                                            navPath.append(series)
+                                        }
+                                        .contextMenu {
+                                            Button { navPath.append(series) } label: { Label("查看完整積分榜與賽程", systemImage: "list.number") }
+                                            if let ev = store.nextEvent(for: series) {
+                                                Button {
+                                                    Task {
+                                                        let ok = await store.scheduleReminder(for: ev)
+                                                        showToast(ok ? "已預約 \(store.displayTranslated(ev.name)) 開賽前 15 分鐘提醒" : "無法排程提醒（請檢查通知權限）")
+                                                    }
+                                                } label: { Label("預約下一場開賽提醒", systemImage: "bell.badge.fill") }
+                                            }
+                                        }
                                 }
                             }
+                            .scrollTargetLayout()
                         }
+                        .contentMargins(.horizontal, 40, for: .scrollContent)
+                        .scrollTargetBehavior(.viewAligned)
+                        .scrollPosition(id: $activeSeries)
+                        .frame(height: 274)
 
-                        // Upcoming Calendar (Macau Time)
-                        Text("近期賽程（澳門時間）")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(.white)
+                        HStack(spacing: 7) {
+                            ForEach(RaceSeries.allCases) { s in
+                                let isCurrent = (activeSeries ?? .f1) == s
+                                Circle()
+                                    .fill(Color.white.opacity(isCurrent ? 0.94 : 0.25))
+                                    .frame(width: isCurrent ? 7 : 5.5, height: isCurrent ? 7 : 5.5)
+                            }
+                        }
+                        .padding(.top, 14)
 
-                        VStack(spacing: 10) {
-                            ForEach(RaceSeries.allCases) { series in
-                                if let ev = store.nextEvent(for: series) {
-                                    GlassPanel(cornerRadius: 18) {
-                                        HStack(spacing: 12) {
-                                            Image(systemName: series.symbol)
-                                                .font(.system(size: 16, weight: .bold))
+                        Text("輕點卡片進入完整積分與賽程 · 長按預約提醒 · 下拉刷新")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.48))
+                            .padding(.top, 8)
+
+                        let breaking = store.articles.filter(\.isBreaking).prefix(3)
+                        if !breaking.isEmpty {
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    Label("重點突發快訊（AI 繁中）", systemImage: "bolt.fill")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundStyle(.white.opacity(0.9))
+                                    Spacer()
+                                    if isMasked {
+                                        Button("暫時解鎖") { withAnimation { revealOnce = true } }
+                                            .font(.caption.bold()).foregroundStyle(.yellow)
+                                    }
+                                }
+                                ForEach(Array(breaking)) { art in
+                                    GlassPanel(cornerRadius: 18, highlightOpacity: 0.18) {
+                                        HStack(alignment: .top, spacing: 10) {
+                                            Text(art.alertTag ?? "焦點")
+                                                .font(.system(size: 10, weight: .black))
                                                 .foregroundStyle(.white)
-                                                .frame(width: 38, height: 38)
-                                                .background(series.badgeColor, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-                                            VStack(alignment: .leading, spacing: 3) {
-                                                HStack(spacing: 6) {
-                                                    Text(series.rawValue)
-                                                        .font(.caption2.bold())
-                                                        .foregroundStyle(series.badgeColor)
-                                                    Text(ev.name)
-                                                        .font(.system(size: 14, weight: .semibold))
-                                                        .foregroundStyle(.white)
-                                                        .lineLimit(1)
-                                                }
-                                                Text("\(ev.circuit) · \(RaceDateFmt.fullMacau.string(from: ev.raceDate))")
-                                                    .font(.system(size: 11.5))
-                                                    .foregroundStyle(.white.opacity(0.58))
-                                                    .lineLimit(1)
+                                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                                .background(Color.red, in: Capsule())
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text(store.displayTranslated(art.title))
+                                                    .font(.system(size: 13.5, weight: .semibold))
+                                                    .foregroundStyle(.white)
+                                                    .blur(radius: isMasked ? 6 : 0)
+                                                Text("\(art.series.rawValue) · \(RaceDateFmt.relativeText(art.pubDate))")
+                                                    .font(.system(size: 11)).foregroundStyle(.white.opacity(0.5))
                                             }
                                             Spacer()
-                                            Button {
-                                                store.haptic()
-                                                Task {
-                                                    let ok = await store.scheduleReminder(for: ev)
-                                                    showToast(ok ? "已預約 \(ev.name) 開賽提醒" : "賽事已過期或未開啟通知權限")
-                                                }
-                                            } label: {
-                                                Image(systemName: "bell.badge.fill")
-                                                    .font(.system(size: 14))
-                                                    .foregroundStyle(store.theme.accent)
-                                                    .frame(width: 34, height: 34)
-                                                    .background(.white.opacity(0.08), in: Circle())
-                                            }
                                         }
                                         .padding(14)
                                     }
                                 }
                             }
-                        }
-
-                        // Breaking Alerts Preview
-                        let breaking = store.articles.filter(\.isBreaking).prefix(3)
-                        if !breaking.isEmpty {
-                            Text("重點突發快訊")
-                                .font(.system(size: 16, weight: .bold))
-                                .foregroundStyle(.white)
-
-                            ForEach(Array(breaking)) { art in
-                                GlassPanel(cornerRadius: 16) {
-                                    HStack(alignment: .top, spacing: 10) {
-                                        Text(art.alertTag ?? "重點")
-                                            .font(.system(size: 10, weight: .black))
-                                            .foregroundStyle(.white)
-                                            .padding(.horizontal, 7).padding(.vertical, 3)
-                                            .background(Color.red, in: Capsule())
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            Text(art.title)
-                                                .font(.system(size: 13.5, weight: .semibold))
-                                                .foregroundStyle(.white)
-                                                .blur(radius: isMasked ? 6 : 0)
-                                            Text("\(art.series.rawValue) · \(RaceDateFmt.relativeText(art.pubDate))")
-                                                .font(.system(size: 11))
-                                                .foregroundStyle(.white.opacity(0.5))
-                                        }
-                                        Spacer()
-                                    }
-                                    .padding(14)
-                                }
-                            }
+                            .padding(.horizontal, 20).padding(.top, 20)
                         }
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 10)
                     .padding(.bottom, 30)
                 }
-                .refreshable {
-                    store.haptic()
-                    await store.refreshAll()
-                }
+                .refreshable { store.haptic(); await store.refreshAll() }
 
                 if let toast = reminderToast {
                     VStack {
                         Spacer()
-                        Text(toast)
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white)
+                        Text(toast).font(.system(size: 13, weight: .semibold)).foregroundStyle(.white)
                             .padding(.horizontal, 16).padding(.vertical, 10)
-                            .raceGlass(in: Capsule(), interactive: false)
-                            .padding(.bottom, 22)
+                            .raceGlass(in: Capsule(), interactive: false).padding(.bottom, 24)
                     }
                     .transition(.opacity)
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
+            .navigationDestination(for: RaceSeries.self) { series in SeriesDetailView(series: series) }
+            .sheet(isPresented: $showBriefing) { AIBriefingSheet() }
         }
     }
 
     private func showToast(_ msg: String) {
         withAnimation { reminderToast = msg }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
-            withAnimation { reminderToast = nil }
-        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { withAnimation { reminderToast = nil } }
     }
 }
 
-struct NextRaceCountdownCard: View {
+struct SeriesHeroCard: View {
     @EnvironmentObject var store: MotorsportStore
-    let event: RaceEvent
-    let onRemind: () -> Void
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 60)) { _ in
-            let cd = RaceDateFmt.countdownParts(to: event.raceDate)
-            GlassPanel(cornerRadius: 26) {
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack {
-                        HStack(spacing: 6) {
-                            Image(systemName: event.series.symbol)
-                            Text("\(event.series.rawValue) · ROUND \(event.round)")
-                        }
-                        .font(.system(size: 11, weight: .black, design: .rounded))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10).padding(.vertical, 4)
-                        .background(event.series.badgeColor, in: Capsule())
-
-                        Spacer()
-
-                        Button(action: onRemind) {
-                            Label("提醒我", systemImage: "bell.fill")
-                                .font(.system(size: 11.5, weight: .bold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 10).padding(.vertical, 5)
-                                .background(.white.opacity(0.12), in: Capsule())
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(event.name)
-                            .font(.system(size: 22, weight: .bold))
-                            .foregroundStyle(.white)
-                        Text("\(event.circuit) · 澳門時間 \(RaceDateFmt.fullMacau.string(from: event.raceDate))")
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(.white.opacity(0.65))
-                    }
-
-                    HStack(spacing: 10) {
-                        countdownBox(value: "\(cd.days)", unit: "日")
-                        countdownBox(value: "\(cd.hours)", unit: "小時")
-                        countdownBox(value: "\(cd.mins)", unit: "分鐘")
-                    }
-
-                    if let quali = event.qualiDate {
-                        HStack(spacing: 14) {
-                            Label("排位 \(RaceDateFmt.fullMacau.string(from: quali))", systemImage: "stopwatch")
-                            if let sprint = event.sprintDate {
-                                Label("衝刺 \(RaceDateFmt.fullMacau.string(from: sprint))", systemImage: "bolt.fill")
-                            }
-                        }
-                        .font(.system(size: 11.5, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.6))
-                    }
-                }
-                .padding(20)
-            }
-        }
-    }
-
-    private func countdownBox(value: String, unit: String) -> some View {
-        VStack(spacing: 2) {
-            Text(value)
-                .font(.system(size: 28, weight: .black, design: .rounded))
-                .foregroundStyle(.white)
-                .monospacedDigit()
-            Text(unit)
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.55))
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 10)
-        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-}
-
-struct LeaderMiniCard: View {
     let series: RaceSeries
-    let p1: DriverStanding?
-    let p2: DriverStanding?
     let masked: Bool
 
     var body: some View {
+        let drivers = store.driverStandings[series] ?? []
+        let p1 = drivers.first
+        let p2 = drivers.count > 1 ? drivers[1] : nil
         let gap = (p1?.points ?? 0) - (p2?.points ?? 0)
-        GlassPanel(cornerRadius: 22) {
-            VStack(alignment: .leading, spacing: 10) {
+        let nextEv = store.nextEvent(for: series)
+
+        GlassPanel(cornerRadius: 28, highlightOpacity: 0.28) {
+            VStack(alignment: .leading, spacing: 0) {
                 HStack {
-                    Text(series.rawValue)
-                        .font(.system(size: 11, weight: .black, design: .rounded))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(series.badgeColor, in: Capsule())
+                    HStack(spacing: 6) {
+                        Image(systemName: series.symbol).font(.system(size: 12, weight: .bold))
+                        Text(series.rawValue).font(.system(size: 13, weight: .black, design: .rounded))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(series.badgeColor, in: Capsule())
+
                     Spacer()
-                    Image(systemName: "crown.fill")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.yellow)
+
+                    if p1 != nil && p2 != nil {
+                        Text("領先 +\(Int(gap)) 分")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(.green)
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(Color.green.opacity(0.16), in: Capsule())
+                            .blur(radius: masked ? 5 : 0)
+                    }
                 }
 
-                if let leader = p1 {
+                Spacer(minLength: 8)
+
+                HStack(spacing: 14) {
+                    ZStack {
+                        Circle()
+                            .fill(RadialGradient(colors: [series.badgeColor.opacity(0.35), .clear], center: .center, startRadius: 4, endRadius: 44))
+                            .frame(width: 78, height: 78)
+                        Image(systemName: series.symbol).font(.system(size: 34, weight: .semibold)).foregroundStyle(.white)
+                    }
+
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(leader.name)
-                            .font(.system(size: 18, weight: .bold))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                        Text(leader.team)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.white.opacity(0.6))
-                            .lineLimit(1)
+                        Label("目前領先 P1", systemImage: "crown.fill").font(.system(size: 11, weight: .bold)).foregroundStyle(.yellow)
+                        Text(p1?.name ?? "載入中...").font(.system(size: 19, weight: .bold)).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.8)
+                        Text(p1?.team ?? series.fullTitle).font(.system(size: 12)).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
                     }
                     .blur(radius: masked ? 7 : 0)
+                    Spacer(minLength: 0)
+                }
 
-                    HStack(alignment: .firstTextBaseline) {
-                        Text("\(Int(leader.points))")
-                            .font(.system(size: 28, weight: .black, design: .rounded))
-                            .foregroundStyle(Color(hex: leader.colorHex))
-                        Text("PTS")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.55))
+                Spacer(minLength: 8)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text("\(Int(p1?.points ?? 0))").font(.system(size: 36, weight: .black, design: .rounded)).foregroundStyle(.white).monospacedDigit()
+                        Text("PTS").font(.system(size: 14, weight: .bold, design: .rounded)).foregroundStyle(.white.opacity(0.6))
                         Spacer()
-                        if p2 != nil {
-                            Text("領先 +\(Int(gap)) 分")
-                                .font(.system(size: 11, weight: .bold, design: .rounded))
-                                .foregroundStyle(.green)
-                                .padding(.horizontal, 8).padding(.vertical, 4)
-                                .background(Color.green.opacity(0.16), in: Capsule())
+                        if let wins = p1?.wins, wins > 0 {
+                            Text("\(wins) 場分站冠軍").font(.system(size: 11.5, weight: .semibold)).foregroundStyle(.yellow.opacity(0.9))
                         }
                     }
                     .blur(radius: masked ? 7 : 0)
-                } else {
-                    Text("載入中...").foregroundStyle(.white.opacity(0.5))
+
+                    if let ev = nextEv {
+                        Text("下站：\(store.displayTranslated(ev.name)) · \(RaceDateFmt.md.string(from: ev.raceDate))")
+                            .font(.system(size: 11.5, weight: .medium)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+                    }
                 }
             }
-            .padding(16)
+            .padding(20)
         }
     }
 }
 
-// MARK: - TAB 2: Standings, Latest Results & Driver H2H Comparison (v2.0)
-struct StandingsAndH2HView: View {
+// MARK: - Series Detail View
+struct SeriesDetailView: View {
     @EnvironmentObject var store: MotorsportStore
-    @State private var selectedSeries: RaceSeries = .f1
-    @State private var subTab = 0 // 0=車手, 1=車隊, 2=最新成績, 3=H2H對比
-    @State private var driverAIndex = 0
-    @State private var driverBIndex = 1
+    @Environment(\.dismiss) var dismiss
+    let series: RaceSeries
+
+    @State private var subTab = 0
+    @State private var selectedBarIdx: Int?
     @State private var revealLatest = false
 
     var body: some View {
-        let drivers = store.driverStandings[selectedSeries] ?? []
-        let teams = store.teamStandings[selectedSeries] ?? []
+        let drivers = store.driverStandings[series] ?? []
+        let teams = store.teamStandings[series] ?? []
+        let events = store.schedules[series] ?? []
+        let p1 = drivers.first
+        let p2 = drivers.count > 1 ? drivers[1] : nil
+        let top10 = Array(drivers.prefix(10))
 
-        NavigationStack {
-            ZStack {
-                RacingBackgroundView()
+        ZStack {
+            RacingBackgroundView()
 
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text("積分榜與對比")
-                            .font(.system(size: 30, weight: .bold))
-                            .foregroundStyle(.white)
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        Button { dismiss() } label: {
+                            Image(systemName: "chevron.left").font(.system(size: 18, weight: .semibold)).foregroundStyle(.white)
+                                .frame(width: 40, height: 40).raceGlass(in: Circle(), interactive: true)
+                        }
+                        Spacer()
+                        Text(series.rawValue).font(.system(size: 13, weight: .black, design: .rounded)).foregroundStyle(.white)
+                            .padding(.horizontal, 12).padding(.vertical, 6).background(series.badgeColor, in: Capsule())
+                    }
 
-                        // Series Selector
-                        HStack(spacing: 8) {
-                            ForEach(RaceSeries.allCases) { s in
-                                let active = selectedSeries == s
-                                Button {
-                                    store.haptic()
-                                    withAnimation(.spring(response: 0.25)) {
-                                        selectedSeries = s
-                                        driverAIndex = 0
-                                        driverBIndex = min(1, max(0, (store.driverStandings[s]?.count ?? 1) - 1))
+                    Text(series.fullTitle).font(.system(size: 28, weight: .bold)).foregroundStyle(.white)
+
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                        RaceMetricTile(title: "目前榜首", bigValue: p1?.shortCode ?? "--", sub: p1?.name ?? "-")
+                        RaceMetricTile(title: "領先分差", bigValue: p2 != nil ? "+\(Int((p1?.points ?? 0) - (p2?.points ?? 0)))" : "--", sub: "對第 2 名積分優勢")
+                        RaceMetricTile(title: "參賽車手", bigValue: "\(drivers.count)", sub: "名積分榜車手")
+                        RaceMetricTile(title: "賽季分站", bigValue: "\(events.count)", sub: "場全年大賽")
+                    }
+
+                    if !top10.isEmpty {
+                        GlassPanel(cornerRadius: 22) {
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("前 10 名積分分佈").font(.system(size: 14.5, weight: .semibold)).foregroundStyle(.white)
+                                        Text("輕點柱形查看車手分數").font(.system(size: 11)).foregroundStyle(.white.opacity(0.48))
                                     }
-                                } label: {
-                                    HStack(spacing: 5) {
-                                        Image(systemName: s.symbol).font(.system(size: 12))
-                                        Text(s.rawValue).font(.system(size: 13.5, weight: .bold))
+                                    Spacer()
+                                    if let idx = selectedBarIdx, idx < top10.count {
+                                        let d = top10[idx]
+                                        Text("\(d.shortCode) · \(Int(d.points)) PTS")
+                                            .font(.system(size: 12, weight: .bold, design: .rounded)).foregroundStyle(Color(hex: d.colorHex))
+                                            .padding(.horizontal, 10).padding(.vertical, 5).background(.white.opacity(0.10), in: Capsule())
                                     }
-                                    .foregroundStyle(active ? .white : .white.opacity(0.55))
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 9)
-                                    .background(active ? s.badgeColor : Color.white.opacity(0.08), in: Capsule())
                                 }
-                                .buttonStyle(.plain)
+                                let maxPts = max(1.0, top10.map(\.points).max() ?? 1.0)
+                                HStack(alignment: .bottom, spacing: 6) {
+                                    ForEach(Array(top10.enumerated()), id: \.offset) { idx, d in
+                                        let picked = selectedBarIdx == idx
+                                        VStack(spacing: 5) {
+                                            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                                .fill(picked ? Color(hex: d.colorHex) : Color(hex: d.colorHex).opacity(0.65))
+                                                .frame(maxWidth: .infinity).frame(height: max(8, CGFloat(d.points / maxPts) * 98))
+                                            Text(d.shortCode).font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(.white.opacity(picked ? 1.0 : 0.55))
+                                        }
+                                        .contentShape(Rectangle())
+                                        .onTapGesture { store.haptic(); withAnimation(.easeOut(duration: 0.16)) { selectedBarIdx = (selectedBarIdx == idx) ? nil : idx } }
+                                    }
+                                }
+                                .frame(height: 118, alignment: .bottom)
+                            }
+                            .padding(18)
+                        }
+                    }
+
+                    Picker("", selection: $subTab) {
+                        Text("車手榜").tag(0); Text("車隊榜").tag(1); Text("最新站").tag(2); Text("賽程").tag(3)
+                    }
+                    .pickerStyle(.segmented)
+
+                    if subTab == 0 {
+                        ForEach(drivers) { d in
+                            GlassPanel(cornerRadius: 16, highlightOpacity: 0.16) {
+                                HStack(spacing: 12) {
+                                    Text("\(d.position)").font(.system(size: 16, weight: .black, design: .rounded)).foregroundStyle(d.position <= 3 ? .yellow : .white.opacity(0.6)).frame(width: 26)
+                                    RoundedRectangle(cornerRadius: 2).fill(Color(hex: d.colorHex)).frame(width: 4, height: 32)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(d.name).font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
+                                        Text(d.team).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55))
+                                    }
+                                    Spacer()
+                                    VStack(alignment: .trailing, spacing: 2) {
+                                        Text("\(Int(d.points)) PTS").font(.system(size: 15, weight: .black, design: .rounded)).foregroundStyle(.white)
+                                        if d.wins > 0 { Text("\(d.wins) 勝").font(.caption2.bold()).foregroundStyle(.yellow) }
+                                    }
+                                }
+                                .padding(13)
                             }
                         }
-
-                        // Sub-mode Picker
-                        Picker("", selection: $subTab) {
-                            Text("車手榜").tag(0)
-                            Text("車隊榜").tag(1)
-                            Text("最新站").tag(2)
-                            Text("H2H 對比").tag(3)
+                    } else if subTab == 1 {
+                        ForEach(teams) { t in
+                            GlassPanel(cornerRadius: 16, highlightOpacity: 0.16) {
+                                HStack(spacing: 12) {
+                                    Text("\(t.position)").font(.system(size: 16, weight: .black, design: .rounded)).foregroundStyle(t.position <= 3 ? .yellow : .white.opacity(0.6)).frame(width: 26)
+                                    RoundedRectangle(cornerRadius: 2).fill(Color(hex: t.colorHex)).frame(width: 4, height: 28)
+                                    Text(t.name).font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
+                                    Spacer()
+                                    Text("\(Int(t.points)) PTS").font(.system(size: 15, weight: .black, design: .rounded)).foregroundStyle(.white)
+                                }
+                                .padding(14)
+                            }
                         }
-                        .pickerStyle(.segmented)
-
-                        if subTab == 0 {
-                            VStack(spacing: 10) {
-                                ForEach(drivers) { d in
-                                    GlassPanel(cornerRadius: 16) {
-                                        HStack(spacing: 12) {
-                                            Text("\(d.position)")
-                                                .font(.system(size: 16, weight: .black, design: .rounded))
-                                                .foregroundStyle(d.position <= 3 ? .yellow : .white.opacity(0.65))
-                                                .frame(width: 26)
-                                            RoundedRectangle(cornerRadius: 2)
-                                                .fill(Color(hex: d.colorHex))
-                                                .frame(width: 4, height: 32)
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                HStack(spacing: 6) {
-                                                    Text(d.name).font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
-                                                    if !d.number.isEmpty {
-                                                        Text("#\(d.number)").font(.caption2.bold()).foregroundStyle(.white.opacity(0.45))
-                                                    }
-                                                }
-                                                Text(d.team).font(.system(size: 11.5)).foregroundStyle(.white.opacity(0.55))
-                                            }
-                                            Spacer()
-                                            VStack(alignment: .trailing, spacing: 2) {
-                                                Text("\(Int(d.points)) PTS")
-                                                    .font(.system(size: 15, weight: .black, design: .rounded))
-                                                    .foregroundStyle(.white)
-                                                if d.wins > 0 {
-                                                    Text("\(d.wins) 勝").font(.caption2.bold()).foregroundStyle(.yellow)
-                                                }
-                                            }
-                                        }
-                                        .padding(13)
-                                    }
+                    } else if subTab == 2 {
+                        if let latest = store.latestResults[series] {
+                            let masked = store.spoilerFree && !revealLatest
+                            HStack {
+                                Text(store.displayTranslated(latest.raceName)).font(.headline).foregroundStyle(.white)
+                                Spacer()
+                                if masked {
+                                    Button("解鎖成績") { withAnimation { revealLatest = true } }
+                                        .font(.caption.bold()).foregroundStyle(.black).padding(.horizontal, 10).padding(.vertical, 5).background(Color.yellow, in: Capsule())
                                 }
                             }
-                        } else if subTab == 1 {
-                            if teams.isEmpty {
-                                Text("此賽事暫無車隊榜數據").foregroundStyle(.white.opacity(0.55)).padding()
-                            } else {
-                                VStack(spacing: 10) {
-                                    ForEach(teams) { t in
-                                        GlassPanel(cornerRadius: 16) {
-                                            HStack(spacing: 12) {
-                                                Text("\(t.position)").font(.system(size: 16, weight: .black, design: .rounded)).foregroundStyle(t.position <= 3 ? .yellow : .white.opacity(0.65)).frame(width: 26)
-                                                RoundedRectangle(cornerRadius: 2).fill(Color(hex: t.colorHex)).frame(width: 4, height: 28)
-                                                Text(t.name).font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
-                                                Spacer()
-                                                Text("\(Int(t.points)) PTS").font(.system(size: 15, weight: .black, design: .rounded)).foregroundStyle(.white)
-                                            }
-                                            .padding(14)
-                                        }
-                                    }
-                                }
-                            }
-                        } else if subTab == 2 {
-                            if let latest = store.latestResults[selectedSeries] {
-                                let masked = store.spoilerFree && !revealLatest
-                                VStack(alignment: .leading, spacing: 10) {
+                            ForEach(latest.results) { row in
+                                GlassPanel(cornerRadius: 14, highlightOpacity: 0.14) {
                                     HStack {
+                                        Text("P\(row.position)").font(.system(size: 14, weight: .black, design: .rounded)).foregroundStyle(row.position <= 3 ? .yellow : .white.opacity(0.7)).frame(width: 34, alignment: .leading)
                                         VStack(alignment: .leading, spacing: 2) {
-                                            Text(latest.raceName).font(.system(size: 18, weight: .bold)).foregroundStyle(.white)
-                                            Text(latest.dateText).font(.caption).foregroundStyle(.white.opacity(0.55))
+                                            Text(row.driverName).font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
+                                            Text(row.teamName).font(.caption2).foregroundStyle(.white.opacity(0.55))
                                         }
                                         Spacer()
-                                        if masked {
-                                            Button("解鎖成績") {
-                                                store.haptic()
-                                                withAnimation { revealLatest = true }
-                                            }
-                                            .font(.caption.bold())
-                                            .foregroundStyle(.black)
-                                            .padding(.horizontal, 12).padding(.vertical, 6)
-                                            .background(Color.yellow, in: Capsule())
-                                        }
+                                        Text(store.displayTranslated(row.timeOrStatus)).font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(.white.opacity(0.85))
                                     }
-
-                                    ForEach(latest.results) { row in
-                                        GlassPanel(cornerRadius: 14) {
-                                            HStack {
-                                                Text("P\(row.position)")
-                                                    .font(.system(size: 14, weight: .black, design: .rounded))
-                                                    .foregroundStyle(row.position <= 3 ? .yellow : .white.opacity(0.7))
-                                                    .frame(width: 34, alignment: .leading)
-                                                VStack(alignment: .leading, spacing: 2) {
-                                                    Text(row.driverName).font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
-                                                    Text(row.teamName).font(.caption2).foregroundStyle(.white.opacity(0.55))
-                                                }
-                                                Spacer()
-                                                VStack(alignment: .trailing, spacing: 2) {
-                                                    Text(row.timeOrStatus).font(.system(size: 12, weight: .semibold, design: .monospaced)).foregroundStyle(.white.opacity(0.85))
-                                                    if row.points > 0 {
-                                                        Text("+\(Int(row.points)) pts").font(.caption2.bold()).foregroundStyle(store.theme.accent)
-                                                    }
-                                                }
-                                            }
-                                            .padding(12)
-                                            .blur(radius: masked ? 7 : 0)
-                                        }
-                                    }
-                                }
-                            } else {
-                                GlassPanel(cornerRadius: 18) {
-                                    Text("最新一站正賽成績暫時只支援 F1 即時拉取，請切換至 F1 或下拉更新。")
-                                        .font(.system(size: 13.5))
-                                        .foregroundStyle(.white.opacity(0.65))
-                                        .padding(20)
+                                    .padding(12).blur(radius: masked ? 7 : 0)
                                 }
                             }
                         } else {
-                            // v2.0 Driver Head-to-Head Comparison
-                            if drivers.count >= 2 {
-                                let safeA = min(driverAIndex, drivers.count - 1)
-                                let safeB = min(driverBIndex, drivers.count - 1)
-                                DriverH2HCard(
-                                    drivers: drivers,
-                                    indexA: $driverAIndex,
-                                    indexB: $driverBIndex,
-                                    dA: drivers[safeA],
-                                    dB: drivers[safeB]
-                                )
-                            } else {
-                                Text("需要至少兩位車手數據進行對比").foregroundStyle(.white.opacity(0.5))
+                            GlassPanel(cornerRadius: 16) {
+                                Text("最新正賽詳細名次暫支援 F1 即時拉取。").font(.subheadline).foregroundStyle(.white.opacity(0.6)).padding(18)
+                            }
+                        }
+                    } else {
+                        ForEach(events) { ev in
+                            let isPast = ev.raceDate < Date()
+                            GlassPanel(cornerRadius: 16, highlightOpacity: 0.15) {
+                                HStack {
+                                    Text("R\(ev.round)").font(.system(size: 13, weight: .black, design: .rounded)).foregroundStyle(isPast ? .white.opacity(0.35) : series.badgeColor).frame(width: 32)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(store.displayTranslated(ev.name)).font(.system(size: 14.5, weight: .bold)).foregroundStyle(isPast ? .white.opacity(0.55) : .white)
+                                        Text("\(ev.circuit) · 澳門 \(RaceDateFmt.fullMacau.string(from: ev.raceDate))").font(.caption).foregroundStyle(.white.opacity(0.5))
+                                    }
+                                    Spacer()
+                                    if isPast { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green.opacity(0.6)) }
+                                }
+                                .padding(13)
                             }
                         }
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 10)
-                    .padding(.bottom, 30)
                 }
-                .refreshable {
-                    store.haptic()
-                    await store.refreshAll()
-                }
+                .padding(.horizontal, 20).padding(.top, 10).padding(.bottom, 30)
             }
-            .toolbar(.hidden, for: .navigationBar)
         }
+        .toolbar(.hidden, for: .navigationBar)
     }
 }
 
-struct DriverH2HCard: View {
-    let drivers: [DriverStanding]
-    @Binding var indexA: Int
-    @Binding var indexB: Int
-    let dA: DriverStanding
-    let dB: DriverStanding
-
+struct RaceMetricTile: View {
+    let title: String, bigValue: String, sub: String
     var body: some View {
-        let totalPts = max(1.0, dA.points + dB.points)
-        let ratioA = dA.points / totalPts
-        let diff = abs(dA.points - dB.points)
-        let leader = dA.points >= dB.points ? dA : dB
-        let racesNeeded = Int(ceil(diff / 25.0))
-
-        return GlassPanel(cornerRadius: 24) {
-            VStack(spacing: 18) {
-                HStack {
-                    Picker("車手 A", selection: $indexA) {
-                        ForEach(0..<drivers.count, id: \.self) { i in
-                            Text("P\(drivers[i].position) \(drivers[i].shortCode)").tag(i)
-                        }
-                    }
-                    .tint(Color(hex: dA.colorHex))
-
-                    Text("VS")
-                        .font(.system(size: 14, weight: .black, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.5))
-
-                    Picker("車手 B", selection: $indexB) {
-                        ForEach(0..<drivers.count, id: \.self) { i in
-                            Text("P\(drivers[i].position) \(drivers[i].shortCode)").tag(i)
-                        }
-                    }
-                    .tint(Color(hex: dB.colorHex))
-                }
-
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(dA.shortCode).font(.system(size: 28, weight: .black, design: .rounded)).foregroundStyle(Color(hex: dA.colorHex))
-                        Text(dA.name).font(.caption.bold()).foregroundStyle(.white).lineLimit(1)
-                        Text(dA.team).font(.caption2).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
-                    }
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 4) {
-                        Text(dB.shortCode).font(.system(size: 28, weight: .black, design: .rounded)).foregroundStyle(Color(hex: dB.colorHex))
-                        Text(dB.name).font(.caption.bold()).foregroundStyle(.white).lineLimit(1)
-                        Text(dB.team).font(.caption2).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
-                    }
-                }
-
-                // Visual Points Share Bar
-                VStack(spacing: 6) {
-                    HStack {
-                        Text("\(Int(dA.points)) PTS").font(.system(size: 15, weight: .black, design: .rounded))
-                        Spacer()
-                        Text("積分佔比").font(.caption2).foregroundStyle(.white.opacity(0.55))
-                        Spacer()
-                        Text("\(Int(dB.points)) PTS").font(.system(size: 15, weight: .black, design: .rounded))
-                    }
-                    GeometryReader { geo in
-                        HStack(spacing: 3) {
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(Color(hex: dA.colorHex))
-                                .frame(width: max(12, geo.size.width * ratioA - 2))
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(Color(hex: dB.colorHex))
-                                .frame(width: max(12, geo.size.width * (1 - ratioA) - 2))
-                        }
-                    }
-                    .frame(height: 12)
-                }
-
-                Divider().overlay(.white.opacity(0.12))
-
-                h2hRow(left: "P\(dA.position)", label: "目前排名", right: "P\(dB.position)")
-                h2hRow(left: "\(dA.wins)", label: "分站冠軍", right: "\(dB.wins)")
-                h2hRow(left: String(format: "%.0f%%", ratioA * 100), label: "分數比重", right: String(format: "%.0f%%", (1 - ratioA) * 100))
-
-                // Championship Math Note
-                HStack(spacing: 8) {
-                    Image(systemName: "function")
-                        .foregroundStyle(.yellow)
-                    Text(diff == 0
-                         ? "兩位車手目前同分！"
-                         : "\(leader.shortCode) 領先 \(Int(diff)) 分；按每站最高 25 分計，落後一方最少需 \(racesNeeded) 站全勝（且對手零分）先可反超。")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.78))
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
+        GlassPanel(cornerRadius: 20, highlightOpacity: 0.18) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.white.opacity(0.58))
+                Text(bigValue).font(.system(size: 26, weight: .black, design: .rounded)).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.75)
+                Text(sub).font(.system(size: 11)).foregroundStyle(.white.opacity(0.45)).lineLimit(1)
             }
-            .padding(18)
-        }
-    }
-
-    private func h2hRow(left: String, label: String, right: String) -> some View {
-        HStack {
-            Text(left).font(.system(size: 15, weight: .bold, design: .rounded)).foregroundStyle(.white).frame(width: 70, alignment: .leading)
-            Spacer()
-            Text(label).font(.system(size: 12)).foregroundStyle(.white.opacity(0.55))
-            Spacer()
-            Text(right).font(.system(size: 15, weight: .bold, design: .rounded)).foregroundStyle(.white).frame(width: 70, alignment: .trailing)
+            .frame(maxWidth: .infinity, alignment: .leading).padding(16)
         }
     }
 }
 
-// MARK: - TAB 3: F1 Telemetry Lab (v2.0: Tire Strategy + Team Radio Player + Race Control)
-struct F1TelemetryLabView: View {
+// MARK: - TAB 2: F1 Telemetry & Race Weekend
+struct TelemetryWeekendView: View {
     @EnvironmentObject var store: MotorsportStore
     @EnvironmentObject var radioPlayer: RadioAudioPlayer
-    @State private var labSection = 0 // 0=換胎策略, 1=Team Radio, 2=賽事控制
+    @State private var labTab = 0
     @State private var selectedRadioDriver = "ALL"
 
     var body: some View {
+        let prog = store.f1SeasonProgress()
+        let ratio = Double(prog.completed) / Double(max(1, prog.total))
+
         NavigationStack {
             ZStack {
                 RacingBackgroundView()
@@ -781,463 +750,23 @@ struct F1TelemetryLabView: View {
                     VStack(alignment: .leading, spacing: 16) {
                         HStack {
                             VStack(alignment: .leading, spacing: 3) {
-                                Text("F1 遙測實驗室")
-                                    .font(.system(size: 30, weight: .bold))
-                                    .foregroundStyle(.white)
-                                Text(store.openF1SessionName.isEmpty ? "OpenF1 即時數據連接中..." : store.openF1SessionName)
-                                    .font(.system(size: 12.5, weight: .medium))
-                                    .foregroundStyle(store.theme.accent)
+                                Text("遙測實驗室").font(.system(size: 32, weight: .bold)).foregroundStyle(.white)
+                                Text(store.openF1SessionName.isEmpty ? "OpenF1 數據同步中..." : store.openF1SessionName)
+                                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(store.theme.accent)
                             }
                             Spacer()
-                            if store.isLoadingTelemetry {
-                                ProgressView().tint(.white)
-                            }
+                            if store.isLoadingTelemetry { ProgressView().tint(.white) }
                         }
 
-                        Picker("", selection: $labSection) {
-                            Text("換胎策略").tag(0)
-                            Text("Team Radio").tag(1)
-                            Text("判罰 / 旗號").tag(2)
-                        }
-                        .pickerStyle(.segmented)
-
-                        if labSection == 0 {
-                            tireStrategySection
-                        } else if labSection == 1 {
-                            teamRadioSection
-                        } else {
-                            raceControlSection
-                        }
-                    }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 10)
-                    .padding(.bottom, 30)
-                }
-                .refreshable {
-                    store.haptic()
-                    await store.fetchOpenF1Telemetry()
-                }
-            }
-            .toolbar(.hidden, for: .navigationBar)
-        }
-    }
-
-    private var tireStrategySection: some View {
-        let maxLap = max(1, store.f1Strategies.map(\.totalLaps).max() ?? 50)
-        return VStack(alignment: .leading, spacing: 12) {
-            // Compound Legend
-            HStack(spacing: 12) {
-                legendDot(color: Color(red: 0.94, green: 0.20, blue: 0.22), text: "S 軟胎")
-                legendDot(color: Color(red: 0.98, green: 0.82, blue: 0.16), text: "M 中胎")
-                legendDot(color: Color(white: 0.92), text: "H 硬胎")
-                legendDot(color: Color(red: 0.20, green: 0.80, blue: 0.36), text: "I 半雨")
-                legendDot(color: Color(red: 0.16, green: 0.56, blue: 0.98), text: "W 全雨")
-            }
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.white.opacity(0.75))
-
-            if store.f1Strategies.isEmpty {
-                GlassPanel(cornerRadius: 18) {
-                    Text("暫未載入換胎策略數據，請下拉重新同步 OpenF1。")
-                        .font(.system(size: 13.5)).foregroundStyle(.white.opacity(0.6)).padding(20)
-                }
-            } else {
-                GlassPanel(cornerRadius: 22) {
-                    VStack(spacing: 12) {
-                        ForEach(store.f1Strategies) { drv in
-                            HStack(spacing: 10) {
-                                HStack(spacing: 4) {
-                                    RoundedRectangle(cornerRadius: 2)
-                                        .fill(Color(hex: drv.teamColorHex))
-                                        .frame(width: 3, height: 18)
-                                    Text(drv.acronym)
-                                        .font(.system(size: 12.5, weight: .black, design: .monospaced))
-                                        .foregroundStyle(.white)
-                                }
-                                .frame(width: 46, alignment: .leading)
-
-                                GeometryReader { geo in
-                                    HStack(spacing: 2.5) {
-                                        ForEach(drv.stints) { st in
-                                            let w = max(16, (CGFloat(st.lapCount) / CGFloat(maxLap)) * geo.size.width - 2.5)
-                                            ZStack {
-                                                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                                    .fill(st.compoundColor)
-                                                Text("\(st.shortLetter)\(st.lapCount)")
-                                                    .font(.system(size: 9.5, weight: .black, design: .rounded))
-                                                    .foregroundStyle(st.compound.uppercased() == "HARD" || st.compound.uppercased() == "MEDIUM" ? .black : .white)
-                                                    .minimumScaleFactor(0.6)
-                                                    .lineLimit(1)
-                                            }
-                                            .frame(width: w, height: 20)
-                                        }
+                        GlassPanel(cornerRadius: 26, highlightOpacity: 0.25) {
+                            HStack(spacing: 18) {
+                                ZStack {
+                                    Circle().stroke(Color.white.opacity(0.10), lineWidth: 11)
+                                    Circle()
+                                        .trim(from: 0, to: ratio)
+                                        .stroke(LinearGradient(colors: [store.theme.accent, store.theme.accent.opacity(0.45)], startPoint: .topLeading, endPoint: .bottomTrailing), style: StrokeStyle(lineWidth: 11, lineCap: .round))
+                                        .rotationEffect(.degrees(-90))
+                                    VStack(spacing: 1) {
+                                        Text("\(Int(round(ratio * 100)))%").font(.system(size: 19, weight: .bold, design: .rounded)).foregroundStyle(.white)
+                                        Text("賽季進度").font(.system(size: 9.5)).foregroundStyle(.white.opacity(0.55))
                                     }
-                                }
-                                .frame(height: 20)
-                            }
-                        }
-                    }
-                    .padding(16)
-                }
-            }
-        }
-    }
-
-    private func legendDot(color: Color, text: String) -> some View {
-        HStack(spacing: 4) {
-            Circle().fill(color).frame(width: 8, height: 8)
-            Text(text)
-        }
-    }
-
-    private var teamRadioSection: some View {
-        let driverCodes = ["ALL"] + Array(Set(store.f1RadioClips.map(\.acronym))).sorted()
-        let filtered = selectedRadioDriver == "ALL"
-            ? store.f1RadioClips
-            : store.f1RadioClips.filter { $0.acronym == selectedRadioDriver }
-
-        return VStack(alignment: .leading, spacing: 12) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(driverCodes, id: \.self) { code in
-                        let sel = selectedRadioDriver == code
-                        Button {
-                            store.haptic()
-                            selectedRadioDriver = code
-                        } label: {
-                            Text(code == "ALL" ? "全部車手" : code)
-                                .font(.system(size: 12, weight: .bold, design: .rounded))
-                                .foregroundStyle(sel ? .black : .white.opacity(0.8))
-                                .padding(.horizontal, 12).padding(.vertical, 6)
-                                .background(sel ? Color.white : Color.white.opacity(0.10), in: Capsule())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            if filtered.isEmpty {
-                GlassPanel(cornerRadius: 18) {
-                    Text("暫無 Team Radio 錄音，請下拉刷新。")
-                        .font(.system(size: 13.5)).foregroundStyle(.white.opacity(0.6)).padding(20)
-                }
-            } else {
-                ForEach(filtered) { clip in
-                    let isPlayingThis = radioPlayer.currentURL == clip.recordingURL && radioPlayer.isPlaying
-                    GlassPanel(cornerRadius: 18) {
-                        HStack(spacing: 12) {
-                            Button {
-                                store.haptic()
-                                radioPlayer.toggle(urlString: clip.recordingURL)
-                            } label: {
-                                Image(systemName: isPlayingThis ? "stop.fill" : "play.fill")
-                                    .font(.system(size: 16, weight: .bold))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 42, height: 42)
-                                    .background(Color(hex: clip.teamColorHex), in: Circle())
-                            }
-
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 6) {
-                                    Text(clip.acronym)
-                                        .font(.system(size: 14, weight: .black, design: .monospaced))
-                                        .foregroundStyle(Color(hex: clip.teamColorHex))
-                                    Text(clip.fullName)
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundStyle(.white)
-                                        .lineLimit(1)
-                                }
-                                Text("澳門時間 \(RaceDateFmt.fullMacau.string(from: clip.date)) · 點擊播放無線電")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.white.opacity(0.55))
-                            }
-                            Spacer()
-                            if isPlayingThis {
-                                Image(systemName: "waveform")
-                                    .font(.system(size: 18, weight: .bold))
-                                    .foregroundStyle(store.theme.accent)
-                                    .symbolEffect(.variableColor.iterative)
-                            }
-                        }
-                        .padding(14)
-                    }
-                }
-            }
-        }
-    }
-
-    private var raceControlSection: some View {
-        VStack(spacing: 10) {
-            if store.f1RaceControl.isEmpty {
-                GlassPanel(cornerRadius: 18) {
-                    Text("暫無賽事控制通報，請下拉刷新。")
-                        .font(.system(size: 13.5)).foregroundStyle(.white.opacity(0.6)).padding(20)
-                }
-            } else {
-                ForEach(store.f1RaceControl) { msg in
-                    GlassPanel(cornerRadius: 16) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                Text(msg.flag.isEmpty ? msg.category : msg.flag)
-                                    .font(.system(size: 10.5, weight: .black))
-                                    .foregroundStyle(.white)
-                                    .padding(.horizontal, 8).padding(.vertical, 3)
-                                    .background(msg.isCritical ? Color.red : Color.white.opacity(0.16), in: Capsule())
-                                if let lap = msg.lapNumber {
-                                    Text("LAP \(lap)")
-                                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                        .foregroundStyle(.white.opacity(0.6))
-                                }
-                                Spacer()
-                                Text(RaceDateFmt.hmMacau.string(from: msg.date))
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundStyle(.white.opacity(0.45))
-                            }
-                            Text(msg.message)
-                                .font(.system(size: 13.5, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.92))
-                        }
-                        .padding(14)
-                    }
-                }
-            }
-        }
-    }
-}
-
-// MARK: - TAB 4: Multi-Series News Feed
-struct NewsFeedView: View {
-    @EnvironmentObject var store: MotorsportStore
-    @State private var filterSeries: RaceSeries? = nil
-    @State private var activeURL: IdentifiableURL?
-
-    private var filteredNews: [NewsArticle] {
-        store.articles.filter { art in
-            let matchSeries = (filterSeries == nil || art.series == filterSeries)
-            let matchBreak = (!store.onlyBreakingNews || art.isBreaking)
-            return matchSeries && matchBreak
-        }
-    }
-
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                RacingBackgroundView()
-
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 14) {
-                        HStack {
-                            Text("重點新聞")
-                                .font(.system(size: 30, weight: .bold))
-                                .foregroundStyle(.white)
-                            Spacer()
-                            Button {
-                                store.haptic()
-                                store.onlyBreakingNews.toggle()
-                            } label: {
-                                Label(store.onlyBreakingNews ? "只看重點" : "全部新聞", systemImage: "flame.fill")
-                                    .font(.system(size: 12, weight: .bold))
-                                    .foregroundStyle(store.onlyBreakingNews ? .white : .white.opacity(0.75))
-                                    .padding(.horizontal, 12).padding(.vertical, 7)
-                                    .background(store.onlyBreakingNews ? Color.red : Color.white.opacity(0.10), in: Capsule())
-                            }
-                        }
-
-                        // Series Filter Chips
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 8) {
-                                filterChip(title: "全部", active: filterSeries == nil, color: store.theme.accent) { filterSeries = nil }
-                                ForEach(RaceSeries.allCases) { s in
-                                    filterChip(title: s.rawValue, active: filterSeries == s, color: s.badgeColor) { filterSeries = s }
-                                }
-                            }
-                        }
-
-                        if filteredNews.isEmpty {
-                            GlassPanel(cornerRadius: 18) {
-                                Text("暫無符合條件的新聞，請下拉更新或關閉「只看重點」。")
-                                    .font(.system(size: 13.5)).foregroundStyle(.white.opacity(0.6)).padding(20)
-                            }
-                        } else {
-                            ForEach(filteredNews) { art in
-                                Button {
-                                    store.haptic()
-                                    if let u = URL(string: art.link) { activeURL = IdentifiableURL(url: u) }
-                                } label: {
-                                    GlassPanel(cornerRadius: 18) {
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            HStack(spacing: 6) {
-                                                Text(art.series.rawValue)
-                                                    .font(.system(size: 10, weight: .black))
-                                                    .foregroundStyle(.white)
-                                                    .padding(.horizontal, 7).padding(.vertical, 3)
-                                                    .background(art.series.badgeColor, in: Capsule())
-
-                                                if let alert = art.alertTag {
-                                                    Text(alert)
-                                                        .font(.system(size: 10, weight: .black))
-                                                        .foregroundStyle(.white)
-                                                        .padding(.horizontal, 7).padding(.vertical, 3)
-                                                        .background(Color.red, in: Capsule())
-                                                }
-                                                Spacer()
-                                                Text(RaceDateFmt.relativeText(art.pubDate))
-                                                    .font(.system(size: 11))
-                                                    .foregroundStyle(.white.opacity(0.48))
-                                            }
-
-                                            Text(art.title)
-                                                .font(.system(size: 15, weight: .semibold))
-                                                .foregroundStyle(.white)
-                                                .multilineTextAlignment(.leading)
-                                                .blur(radius: store.spoilerFree ? 6 : 0)
-
-                                            Text(art.source)
-                                                .font(.system(size: 11))
-                                                .foregroundStyle(.white.opacity(0.45))
-                                        }
-                                        .padding(15)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 10)
-                    .padding(.bottom, 30)
-                }
-                .refreshable {
-                    store.haptic()
-                    await store.refreshAll()
-                }
-                .sheet(item: $activeURL) { item in
-                    SafariSheetView(url: item.url).ignoresSafeArea()
-                }
-            }
-            .toolbar(.hidden, for: .navigationBar)
-        }
-    }
-
-    private func filterChip(title: String, active: Bool, color: Color, action: @escaping () -> Void) -> some View {
-        Button {
-            store.haptic()
-            action()
-        } label: {
-            Text(title)
-                .font(.system(size: 12.5, weight: .bold))
-                .foregroundStyle(active ? .white : .white.opacity(0.65))
-                .padding(.horizontal, 14).padding(.vertical, 7)
-                .background(active ? color : Color.white.opacity(0.09), in: Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-struct IdentifiableURL: Identifiable {
-    let id = UUID()
-    let url: URL
-}
-
-// MARK: - TAB 5: Settings
-struct AppSettingsView: View {
-    @EnvironmentObject var store: MotorsportStore
-    @State private var syncedToast = false
-
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                RacingBackgroundView()
-
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 18) {
-                        Text("設定")
-                            .font(.system(size: 30, weight: .bold))
-                            .foregroundStyle(.white)
-
-                        GlassPanel(cornerRadius: 22) {
-                            VStack(spacing: 14) {
-                                HStack {
-                                    Text("本命車隊主題色").font(.system(size: 14.5, weight: .medium))
-                                    Spacer()
-                                    Picker("", selection: $store.theme) {
-                                        ForEach(TeamTheme.allCases) { th in
-                                            Text(th.displayName).tag(th)
-                                        }
-                                    }
-                                    .tint(store.theme.accent)
-                                }
-
-                                Divider().overlay(.white.opacity(0.10))
-
-                                Toggle("防劇透模式（模糊最新成績與新聞）", isOn: $store.spoilerFree)
-                                    .font(.system(size: 14, weight: .medium))
-                                    .tint(store.theme.accent)
-
-                                Divider().overlay(.white.opacity(0.10))
-
-                                Toggle("觸覺震動回饋", isOn: $store.enableHaptics)
-                                    .font(.system(size: 14, weight: .medium))
-                                    .tint(store.theme.accent)
-                            }
-                            .padding(18)
-                        }
-
-                        GlassPanel(cornerRadius: 22) {
-                            VStack(spacing: 14) {
-                                Button {
-                                    store.haptic()
-                                    Task {
-                                        await store.refreshAll()
-                                        withAnimation { syncedToast = true }
-                                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                                        withAnimation { syncedToast = false }
-                                    }
-                                } label: {
-                                    HStack {
-                                        Label("立即重新同步所有賽事與小工具", systemImage: "arrow.triangle.2.circlepath")
-                                            .font(.system(size: 14.5, weight: .semibold))
-                                            .foregroundStyle(store.theme.accent)
-                                        Spacer()
-                                        if let dt = store.lastUpdated {
-                                            Text(RaceDateFmt.hmMacau.string(from: dt))
-                                                .font(.caption.monospaced())
-                                                .foregroundStyle(.white.opacity(0.5))
-                                        }
-                                    }
-                                }
-
-                                Divider().overlay(.white.opacity(0.10))
-
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text("免費數據源狀態").font(.system(size: 13, weight: .bold)).foregroundStyle(.white.opacity(0.8))
-                                    Text("• F1 積分與賽程：Jolpica-F1 Public API\n• F1 換胎 / Team Radio / 判罰：OpenF1 API\n• MotoGP：PulseLive Public API\n• 新聞：Motorsport.com & TouringCarTimes RSS")
-                                        .font(.system(size: 11.5))
-                                        .foregroundStyle(.white.opacity(0.55))
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .padding(18)
-                        }
-
-                        if syncedToast {
-                            Text("已同步最新數據並刷新桌面小工具")
-                                .font(.caption.bold())
-                                .foregroundStyle(.green)
-                                .frame(maxWidth: .infinity, alignment: .center)
-                        }
-
-                        Text("ApexGrid 2.0 · Macau Time (CST) Edition")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.38))
-                            .frame(maxWidth: .infinity, alignment: .center)
-                    }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 10)
-                    .padding(.bottom, 30)
-                }
-            }
-            .toolbar(.hidden, for: .navigationBar)
-        }
-    }
-}
